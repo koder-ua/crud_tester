@@ -2,6 +2,7 @@
 *.o
 *.a
 *.so
+crud_tester
 
 # Folders
 _obj
