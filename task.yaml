@@ -1,0 +1,12 @@
+urls: ["http://10.32.37.71:80","http://10.32.37.72:80"]
+sk: "LASTQG3HJVVQF310SD2U"
+ak: "MboBU2RfEK4imC4rc+fyZxNNA3ymhkWh0dPeonxZ"
+operation: get
+size: 64k
+workers: 100
+bucket: test
+obj_name_templ: test_%s_obj
+chunk_size: 100
+op_count: 100000
+runtime: 0
+time_limit: 0
