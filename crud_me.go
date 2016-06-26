@@ -38,7 +38,7 @@ type WorkerSettings struct {
     task_ch <- chan WorkChunk
     results_ch chan <- *StatResults
     ready_barrier *sync.WaitGroup
-    crud_connector CRUDConnector
+    crud_connector Connector
     timeout_ch <- chan interface{}
     realtime_io_counter_p *uint64
     realtime_err_counter_p *uint64
@@ -71,7 +71,7 @@ type Results struct {
     Err_count int
     Test_time float32
     Iops float32
-    Lat_percentiles [20]int
+    Lat_percentiles [19]int
     Avg_lat int
 }
 
@@ -107,6 +107,7 @@ func worker_func(sett *WorkerSettings) {
         default:
             panic("Unknown op")
         }
+
         for idx := chunk.start_counter; idx != chunk.stop_counter; idx++ {
             obj_name := fmt.Sprintf(chunk.name_template, idx)
             stats.requests_send++
@@ -114,15 +115,15 @@ func worker_func(sett *WorkerSettings) {
 
             err := op_func(obj_name, &chunk)
 
-            curr_lat := (time_nano() - rstart_time) / 1000000
-            stats.lats = append(stats.lats, int(curr_lat))
-
             if nil == err {
+                curr_lat := (time_nano() - rstart_time) / 1000000
+                stats.lats = append(stats.lats, int(curr_lat))
                 stats.requests_complete++
                 if nil != sett.realtime_io_counter_p {
                     atomic.AddUint64(sett.realtime_io_counter_p, 1)
                 }
             } else {
+                fmt.Println(err.Error())
                 if nil != sett.realtime_err_counter_p {
                     atomic.AddUint64(sett.realtime_err_counter_p, 1)
                 }
@@ -169,13 +170,26 @@ func run_test(sett *Settings, op_id int) (*Results, error) {
     switch auth_data[0] {
     case "s3":
         if len(auth_data) != 3 {
-            fmt.Printf("Broken auth data '%s'\n", sett.Auth)
+            fmt.Printf("Broken s3 auth data '%s'\n", sett.Auth)
             os.Exit(1)
         }
-        ws.crud_connector = &S3Connector{auth_data[0],
-                                         auth_data[1],
-                                         sett.Urls[0],
-                                         sett.Bucket}
+        ws.crud_connector = &S3Connector{ak: auth_data[1],
+                                         sk: auth_data[2],
+                                         url: sett.Urls[0],
+                                         bucket_name: sett.Bucket}
+    case "swift":
+        if len(auth_data) != 4 {
+            fmt.Printf("Broken swift auth data '%s'\n", sett.Auth)
+            os.Exit(1)
+        }
+
+        ws.crud_connector = &SwiftConnector{user: auth_data[1],
+                                            auth_url: sett.Urls[0],
+                                            url: sett.Urls[0],
+                                            password: auth_data[2],
+                                            tenant: auth_data[3],
+                                            region: "",
+                                            bucket_name: sett.Bucket}
     default:
         return nil, errors.New(fmt.Sprintf("'%s' storage i not supported\n", auth_data[0]))
     }
@@ -185,9 +199,25 @@ func run_test(sett *Settings, op_id int) (*Results, error) {
     }
 
     ws.ready_barrier.Wait()
-    start_time := time.Now().Unix()
+    start_time := time.Now().UnixNano()
 
-    var stop_idx int    
+    var stop_idx int
+    var put_buffer []byte = nil
+
+    if op_id == OP_PUT {
+        put_buffer = make([]byte, sett.Obj_size)
+        f, err := os.Open("/dev/urandom")
+        if err != nil {
+            fmt.Printf("Can't open /dev/urandom. Will use zeroed byffer. Error %v\n", err)
+        } else {
+            sz, err := f.Read(put_buffer)
+            if err != nil || sz != sett.Obj_size {
+                fmt.Println("Can't read %d bytes from /dev/urandom. Will use zeroed byffer. Error: %v\n",
+                            sett.Obj_size, err)
+            }
+        }
+    }
+
     for start_idx := 0; start_idx < sett.Op_count; start_idx = stop_idx {
         stop_idx = start_idx + sett.Chunk_size 
         if stop_idx > sett.Op_count {
@@ -197,7 +227,8 @@ func run_test(sett *Settings, op_id int) (*Results, error) {
                              start_counter: start_idx,
                              stop_counter: stop_idx,
                              param: 0,
-                             op_type: op_id}
+                             op_type: op_id,
+                             content: put_buffer}
     }
 
     close(task_ch)
@@ -231,12 +262,23 @@ func run_test(sett *Settings, op_id int) (*Results, error) {
         }
     }
 
-    end_time := time.Now().Unix()
-    test_time := float32(end_time - start_time)
+    end_time := time.Now().UnixNano()
+    test_time := float32(end_time - start_time) / 1000000000.0
+    var iops float32
+
+    if len(stats.lats) == 0 {
+        return nil, errors.New("Test failed, no data received")
+    }
+
+    if test_time < 1E-3 {
+        iops = 0
+    } else {
+        iops = float32(stats.requests_complete) / test_time
+    }
 
     res := Results{Sett: sett,
                    Test_time: test_time,
-                   Iops: float32(stats.requests_complete) / test_time,
+                   Iops: iops,
                    Err_count: stats.requests_send - stats.requests_complete,
                    Req_count: stats.requests_send}
 
@@ -247,7 +289,7 @@ func run_test(sett *Settings, op_id int) (*Results, error) {
     res.Avg_lat /= len(stats.lats)
     sort.Ints(stats.lats)
 
-    for i := 0; i < 20 ; i++ {
+    for i := 0; i < 19 ; i++ {
         res.Lat_percentiles[i] = stats.lats[len(stats.lats) * (i + 1) / 20]
     }
 
@@ -262,24 +304,24 @@ func main() {
     cfg_files := flag.Args()
 
     if len(cfg_files) != 1 {
-        fmt.Printf("Usage %s config_file", os.Args[0])
+        fmt.Printf("Usage: %s config_file\n", os.Args[0])
         os.Exit(1)
     }
 
     data, err := ioutil.ReadFile(cfg_files[0])
     if err != nil {
-        fmt.Printf("Faile to read file %s - %v", cfg_files[0], err)
+        fmt.Printf("Fail to read file %s - %v\n", cfg_files[0], err)
         os.Exit(1)
     }
 
     err = yaml.Unmarshal(data, &sett)
     if err != nil {
-        fmt.Printf("Can't parse config file %s - %v", cfg_files[0], err)
+        fmt.Printf("Can't parse config file %s - %v\n", cfg_files[0], err)
         os.Exit(1)
     }
 
-    fmt.Printf("Settings %s\n", sett)
-    os.Exit(0)
+    // fmt.Printf("Settings %#v\n", sett)
+    // os.Exit(0)
 
     if sett.Chunk_size == 0 {
         sett.Chunk_size = sett.Op_count / (sett.Workers * DEFAULT_CHUNK_PER_WORKER)
@@ -299,10 +341,10 @@ func main() {
     }
 
     if len(sett.Urls) > 1 {
-        fmt.Println("Multiple urls not supported yet")
+        fmt.Println("Multiple urls not supported yet\n")
         os.Exit(1)
     } else if len(sett.Urls) == 0 {
-        fmt.Println("No connection urls provided!")
+        fmt.Println("No connection urls provided!\n")
         os.Exit(1)
     }
 
@@ -316,10 +358,10 @@ func main() {
     if !*to_yaml {
         fmt.Printf("Req. send %d\n", res.Req_count)
         fmt.Printf("Err count %d\n", res.Err_count)
-        fmt.Printf("Avg RPS %f\n", int(res.Iops))
+        fmt.Printf("Avg RPS %d\n", int(res.Iops))
         fmt.Printf("Avg lat %d ms\n", res.Avg_lat)
-        fmt.Printf("Med lat %d ms\n", res.Lat_percentiles[10])
-        fmt.Printf("95perc lat %d ms\n", res.Lat_percentiles[19])
+        fmt.Printf("Med lat %d ms\n", res.Lat_percentiles[9])
+        fmt.Printf("95perc lat %d ms\n", res.Lat_percentiles[18])
     } else {
         res, err := yaml.Marshal(res)
         if err != nil {

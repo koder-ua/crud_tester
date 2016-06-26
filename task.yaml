@@ -1,12 +1,23 @@
-urls: ["http://10.32.37.71:80","http://10.32.37.72:80"]
-sk: "LASTQG3HJVVQF310SD2U"
-ak: "MboBU2RfEK4imC4rc+fyZxNNA3ymhkWh0dPeonxZ"
+op_count: 20
+workers: 1
+obj_size: 65536
 operation: get
-size: 64k
-workers: 100
-bucket: test
+chunk_size: 5
 obj_name_templ: test_%s_obj
-chunk_size: 100
-op_count: 100000
-runtime: 0
+bucket: test
 time_limit: 0
+warmup_time: 0
+urls:
+  - "http://localhost:8000"
+auth: "s3 0555b35654ad1656d804 h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q=="
+
+# S3 User Info:
+#   access key:  0555b35654ad1656d804
+#   secret key:  h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==
+
+# Swift User Info:
+#   account   : test
+#   user      : tester
+#   password  : testing
+
+# start rgw on http://localhost:8000
